@@ -1,0 +1,12 @@
+# Ignore everything that is unnecessary for building the container
+.git
+__pycache__
+*.py[cod]
+
+# Local environment
+.env
+.venv
+venv
+
+# Misc
+.DS_Store

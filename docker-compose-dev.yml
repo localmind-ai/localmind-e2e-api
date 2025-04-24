@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >-
+      uvicorn app.main:app --host 0.0.0.0 --port 9000 --reload
+    volumes:
+      - ./:/app # Mount source for hot‑reload
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
