@@ -2,12 +2,12 @@
 
 > **Internal‑use only – runs ONLY on our _Beta_ instance due to security reasons!**
 
-This repository hosts a FastAPI service that exposes a few endpoints used by our E2E deployment pipeline:
+This repository hosts a FastAPI service that exposes a few endpoints used for e2e testing:
 
-| Method | Path        | Description                                                                                                |
-| ------ | ----------- | ---------------------------------------------------------------------------------------------------------- |
-| POST   | `/deploy`   | Trigger deployment of a specific branch (used by Github Actions)                                           |
-| DELETE | `/database` | Wipes the database of certain tables (use cautiously, used by e2e repo if testing on the BETA environment) |
+| Method | Path        | Description                                                                                          |
+| ------ | ----------- | ---------------------------------------------------------------------------------------------------- |
+| POST   | `/deploy`   | Trigger deployment of a specific branch (used by our nightly test run)                               |
+| DELETE | `/database` | Wipes certain database tables (used by e2e test suite when testing manually on the BETA environment) |
 
 All endpoints are secured by a bearer token that must be supplied in the `Authorization` header. Configure the token via `.env`.
 
@@ -35,18 +35,4 @@ Our Nginx server has been configured to route traffic hitting `beta.localmind.io
 ```bash
 docker compose -f docker-compose-prod.yml up --build -d
 docker compose -f docker-compose-prod.yml down
-```
-
-## Directory structure
-
-```
-.
-├── app/
-│   ├── __init__.py
-│   └── main.py
-├── Dockerfile
-├── docker-compose-dev.yml
-├── docker-compose-prod.yml
-├── .env.example
-└── README.md
 ```
