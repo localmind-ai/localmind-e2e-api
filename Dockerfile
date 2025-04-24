@@ -12,8 +12,8 @@ COPY ./app ./app
 # Install Python dependencies – pinning is optional; omit requirements.txt for now
 RUN pip install --no-cache-dir fastapi uvicorn[standard] python-dotenv
 
-# Expose the FastAPI/Uvicorn port
-EXPOSE 9000
+# Expose the default FastAPI/Uvicorn port
+EXPOSE 8000
 
 # Entrypoint – no reload in production image
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
