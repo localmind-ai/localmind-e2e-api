@@ -30,7 +30,7 @@ Changes to `app/` are picked up automatically via `uvicorn --reload`.
 
 ### 3. Production
 
-Our Nginx server has been configured to route traffic hitting `beta.localmind.io/e2e-api` to port 8000 of the beta server. So not only should you not deploy this code to any other server, but you also couldn't without changing the Nginx configuration.
+Our Nginx server has been configured to route traffic hitting `https://beta-e2e.localmind.io/` to port 8000 of the beta server.
 
 ```bash
 docker compose -f docker-compose-prod.yml up --build -d

@@ -4,11 +4,11 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 from dotenv import load_dotenv
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     HTTPException,
