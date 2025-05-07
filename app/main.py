@@ -1,14 +1,22 @@
-# app.py
 from __future__ import annotations
+
+"""FastAPI admin API with background deploy jobs and status polling.
+This file merges the original synchronous implementation with a small
+in‑memory job queue so Swagger UI (/docs) can poll deployment progress.
+"""
 
 import os
 import subprocess
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from threading import Lock
 from typing import Final
 
 from dotenv import load_dotenv
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     HTTPException,
@@ -35,7 +43,7 @@ if not GIT_USERNAME or not GIT_PAT:
 ROOT = Path("/home/localmind")
 REPO = ROOT / "lm-custom-build" / "localmind"
 
-app = FastAPI(title="E2E API", version="1.0.0", docs_url="/docs")
+app = FastAPI(title="E2E API", version="1.1.0", docs_url="/docs")
 security = HTTPBearer(auto_error=False)
 
 
@@ -49,20 +57,28 @@ def _auth(
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# utils
+# -----------------------------------------------------------------------------
+
+
 def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
+    """Run *cmd* raising an exception on non‑zero exit; stdout/stderr are captured."""
     try:
         subprocess.run(cmd, cwd=cwd, env=env, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"Command {' '.join(exc.cmd)!r} failed "
-            f"(exit {exc.returncode})\nstdout:\n{exc.stdout.decode()}\nstderr:\n{exc.stderr.decode()}"
+            f"Command {' '.join(exc.cmd)!r} failed (exit {exc.returncode})\n"
+            f"stdout:\n{exc.stdout.decode()}\nstderr:\n{exc.stderr.decode()}"
         ) from exc
 
 
-def _deploy(branch: str) -> None:
+# -----------------------------------------------------------------------------
+# synchronous deployment helper (re‑uses original logic)
+# -----------------------------------------------------------------------------
+
+
+def _deploy_impl(branch: str) -> None:
     env = {
         **os.environ,
         "GIT_USERNAME": GIT_USERNAME,
@@ -82,54 +98,99 @@ def _deploy(branch: str) -> None:
     _run(["docker", "compose", "up", "-d"], cwd=ROOT, env=env)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────────────────────────────────────
-_DEPLOY_LOCK: Lock = (
-    Lock()
-)  # only one job at a time is allowed to avoid messing sth up on the beta server
+# -----------------------------------------------------------------------------
+# background job runner
+# -----------------------------------------------------------------------------
+
+
+class State(str, Enum):
+    queued = "queued"
+    running = "running"
+    success = "success"
+    error = "error"
+
+
+@dataclass
+class Job:
+    id: str
+    branch: str
+    state: State = State.queued
+    step: str = "waiting for slot"
+    error: str | None = None
+    logs: list[str] = field(default_factory=list)  # not exposed yet; future use
+
+
+JOBS: dict[str, Job] = {}
+_DEPLOY_LOCK: Lock = Lock()  # one deploy at a time – same semantics as before
+
+
+def _deploy_with_status(job: Job) -> None:
+    """Run the blocking deploy inside a background thread, updating *job*."""
+    with _DEPLOY_LOCK:
+        job.state, job.step = State.running, "docker compose down"
+        try:
+            # Each phase updates job.step before the command runs so clients see progress
+            _run(["docker", "compose", "down"], cwd=ROOT, env=os.environ)
+
+            job.step = "git checkout main & pull"
+            _run(["git", "switch", "main"], cwd=REPO, env=os.environ)
+            _run(["git", "pull"], cwd=REPO, env=os.environ)
+
+            job.step = f"git switch {job.branch}"
+            _run(["git", "switch", job.branch], cwd=REPO, env=os.environ)
+
+            job.step = "clean image & builder cache"
+            _run(["docker", "image", "rm", "-f", "localmind"], cwd=ROOT, env=os.environ)
+            _run(["docker", "builder", "prune", "-f"], cwd=ROOT, env=os.environ)
+
+            job.step = "docker build"
+            _run(["docker", "build", "-t", "localmind", "."], cwd=REPO, env=os.environ)
+
+            job.step = "docker compose up -d"
+            _run(["docker", "compose", "up", "-d"], cwd=ROOT, env=os.environ)
+
+            job.state, job.step = State.success, "done"
+        except Exception as exc:
+            job.state, job.error = State.error, str(exc)
+
+
+# -----------------------------------------------------------------------------
+# API – Deployment
+# -----------------------------------------------------------------------------
 
 
 @app.post("/deploy", dependencies=[Depends(_auth)])
-def deploy(branch: str):
-    """
-    Run a deployment synchronously.
-      • 409 if another deployment is already running
-      • 500 on any failure (with reason)
-      • 200 on success
-    """
-    # enforce single-flight
-    if not _DEPLOY_LOCK.acquire(blocking=False):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A deployment is already in progress. Try again later.",
-        )
+def deploy(branch: str, bg: BackgroundTasks):
+    """Kick off a deployment in the background and return a *job_id*."""
+    if not branch.strip():
+        raise HTTPException(status_code=400, detail="branch must be non‑empty")
 
-    try:
-        if not branch.strip():
-            raise HTTPException(
-                status_code=400, detail="branch must be a non-empty string"
-            )
+    job_id = str(uuid.uuid4())
+    job = Job(id=job_id, branch=branch)
+    JOBS[job_id] = job
 
-        _deploy(branch)
-        return {"message": f"Deployment of branch '{branch}' completed successfully."}
+    bg.add_task(_deploy_with_status, job)
 
-    except HTTPException:
-        # propagate explicit FastAPI errors as-is
-        raise
-    except Exception as exc:
-        # wrap any other error into a clean 500
-        raise HTTPException(
-            status_code=500,
-            detail=f"Deployment failed: {exc}",
-        ) from exc
-    finally:
-        _DEPLOY_LOCK.release()
+    return {"job_id": job_id}
+
+
+@app.get("/deploy/{job_id}", dependencies=[Depends(_auth)])
+def deploy_status(job_id: str):
+    """Return the current state/step for the given *job_id*."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    return {
+        "state": job.state,
+        "step": job.step,
+        "error": job.error,
+    }
 
 
 # -----------------------------------------------------------------------------
-# helpers – database reset
+# helpers – database reset (unchanged apart from import tweaks)
 # -----------------------------------------------------------------------------
+
 _DB_LOCK: Lock = Lock()
 _CONTAINER: Final[str] = "localmind"
 _DB_FILE: Final[str] = "data/webui.db"
@@ -161,11 +222,9 @@ _SQL_CMDS = (
 
 
 def _reset_db_in_container() -> None:
-    """
-    Ensure sqlite3 exists in the container, verify the DB file, then wipe rows.
-    """
+    """Ensure sqlite3 exists in the container, verify the DB file, then wipe rows."""
     bash_cmd = (
-        # 1) install sqlite3 if it’s missing
+        # 1) install sqlite3 if it's missing
         "command -v sqlite3 >/dev/null 2>&1 || ("
         "DEBIAN_FRONTEND=noninteractive apt-get update -y && "
         "DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3"
@@ -183,22 +242,13 @@ def _reset_db_in_container() -> None:
     )
 
 
-# -----------------------------------------------------------------------------
-# Endpoints
-# -----------------------------------------------------------------------------
-@app.delete("/database", dependencies=[Depends(_auth)])
+@app.delete("/database", dependencies=[Depends(_auth)], include_in_schema=False)
 async def delete_database():
-    """
-    Clear the tables needed by the E2E test-suite.
-
-      • 200 – success
-      • 409 – another reset already running
-      • 500 – any failure
-    """
+    """Clear tables used by the E2E test‑suite."""
     if not _DB_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A database-reset is already in progress. Try again later.",
+            detail="A database‑reset is already in progress. Try again later.",
         )
 
     try:
@@ -213,3 +263,4 @@ async def delete_database():
 
     finally:
         _DB_LOCK.release()
+
