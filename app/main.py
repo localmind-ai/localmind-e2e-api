@@ -128,15 +128,15 @@ def deploy(branch: str):
 
 
 # -----------------------------------------------------------------------------
-# helpers - database reset
+# helpers – database reset
 # -----------------------------------------------------------------------------
-_DB_LOCK: Lock = Lock()  # keep it separate from the deploy lock
+_DB_LOCK: Lock = Lock()  # separate from the deploy lock
 _CONTAINER: Final[str] = "localmind"
-_DB_FILE_INSIDE: Final[str] = "data/webu.db"
+_DB_FILE: Final[str] = "data/webu.db"
 
 _SQL_CMDS: Final[str] = (
-    "DELETE FROM user WHERE name = 'Test Suite User'; "
-    "DELETE FROM user_group WHERE name != 'default'; "
+    "DELETE FROM user          WHERE name = 'Test Suite User'; "
+    "DELETE FROM user_group    WHERE name != 'default'; "
     "DELETE FROM model; "
     "DELETE FROM model_whitelist; "
     "DELETE FROM tool; "
@@ -148,16 +148,22 @@ _SQL_CMDS: Final[str] = (
 
 def _reset_db_in_container() -> None:
     """
-    Run sqlite commands inside the running Docker container.
-    Needs `sqlite3` to be present in the image.
+    Make sure sqlite3 exists in the container and execute the wipe.
+    Assumes the container runs as root (or user with sudo-less package rights).
     """
-    # Each statement ends with a semicolon, so one invocation is enough.
-    bash_cmd = f'sqlite3 {_DB_FILE_INSIDE} "{_SQL_CMDS}"'
+    bash_cmd = (
+        # 1) install sqlite3 if missing
+        "command -v sqlite3 >/dev/null 2>&1 || "
+        "(DEBIAN_FRONTEND=noninteractive apt-get update && "
+        " DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3) && "
+        # 2) run the deletes
+        f'sqlite3 {_DB_FILE} "{_SQL_CMDS}"'
+    )
 
     _run(
         ["docker", "exec", _CONTAINER, "bash", "-c", bash_cmd],
         cwd=ROOT,
-        env=os.environ,  # no special env needed
+        env=os.environ,
     )
 
 
@@ -167,11 +173,11 @@ def _reset_db_in_container() -> None:
 @app.delete("/database", dependencies=[Depends(_auth)])
 async def delete_database():
     """
-    Clear the tables that have to be reset for the E2E test-suite.
+    Clear the tables needed by the E2E test-suite.
 
-      200 - success
-      409 - another reset already running
-      500 - something went wrong (reason in body)
+      • 200 – success
+      • 409 – another reset already running
+      • 500 – any failure
     """
     if not _DB_LOCK.acquire(blocking=False):
         raise HTTPException(
