@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from threading import Lock
 from typing import Final
+import sqlite3
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -127,14 +128,41 @@ def deploy(branch: str):
         _DEPLOY_LOCK.release()
 
 
-app.delete("/database", dependencies=[Depends(_auth)])
-
-
+@app.delete("/database", dependencies=[Depends(_auth)])
 async def delete_database():
     """
     Clear certain database tables that need to be reset when running our e2e test suite on the Beta environment.
-      • 200 on sucess
+      • 200 on success
       • 500 on any failure (with reason)
     """
-    # TODO: insert real logic
-    return {"message": "Database deletion finished."}
+    db_path = REPO / "data" / "webu.db"
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Delete specific test users
+        cursor.execute("DELETE FROM user WHERE name = 'Test Suite User';")
+
+        # Clear user_group except 'default'
+        cursor.execute("DELETE FROM user_group WHERE name != 'default';")
+
+        # Clear other tables
+        cursor.execute("DELETE FROM model;")
+        cursor.execute("DELETE FROM model_whitelist;")
+
+        cursor.execute("DELETE FROM tool;")
+        cursor.execute("DELETE FROM tool_whitelist;")
+
+        cursor.execute("DELETE FROM function;")
+        cursor.execute("DELETE FROM function_whitelist;")
+
+        conn.commit()
+        conn.close()
+
+        return {"message": "Database deletion finished."}
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Database deletion failed: {exc}"
+        ) from exc

@@ -19,11 +19,14 @@ All endpoints are secured by a bearer token that must be supplied in the `Author
 cp .env.example .env             # then edit API_KEY
 ```
 
-### 2. Development – hot‑reload inside Docker
+### 2. Development
 
 ```bash
-docker compose -f docker-compose-dev.yml up --build -d
-docker compose -f docker-compose-dev.yml down
+# one-time setup (installs deps into Poetry's virtualenv)
+poetry install
+
+# start FastAPI with live-reload
+poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Changes to `app/` are picked up automatically via `uvicorn --reload`.
@@ -32,7 +35,65 @@ Changes to `app/` are picked up automatically via `uvicorn --reload`.
 
 Our Nginx server has been configured to route traffic hitting `https://beta-e2e.localmind.io/` to port 8000 of the beta server.
 
+First, make sure production dependencies are installed:
+
 ```bash
-docker compose -f docker-compose-prod.yml up --build -d
-docker compose -f docker-compose-prod.yml down
+poetry install --no-dev
+```
+
+Then, create a service unit so the API starts automatically on boot and is supervised by the OS.
+
+```bash
+# /etc/systemd/system/e2e-api.service
+[Unit]
+Description=E2E FastAPI service (Gunicorn/Uvicorn)
+After=network.target
+
+[Service]
+# Path to the repo root
+WorkingDirectory=/opt/e2e-api
+# Absolute path to Poetry (adjust if different on your box)
+ExecStart=/usr/bin/poetry run gunicorn app.main:app \
+          -k uvicorn.workers.UvicornWorker \
+          --workers 4 \
+          --bind 0.0.0.0:8000
+EnvironmentFile=/opt/e2e-api/.env
+User=www-data
+Group=www-data
+Restart=on-failure
+# Give Gunicorn time to gracefully stop workers
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Whenever you deploy updates:
+
+```bash
+git pull
+poetry install --no-dev
+sudo systemctl restart e2e-api
+```
+
+That's it! Here are some general commands to help you manage the system service:
+
+```bash
+# register the new unit file
+sudo systemctl daemon-reload
+
+# start / stop / restart the service
+sudo systemctl start   e2e-api
+sudo systemctl stop    e2e-api
+sudo systemctl restart e2e-api
+
+# enable on boot
+sudo systemctl enable  e2e-api
+
+# check current status
+sudo systemctl status  e2e-api
+
+# tail logs (Press Ctrl-C to exit)
+sudo journalctl -u e2e-api -f
 ```
