@@ -135,7 +135,7 @@ _CONTAINER: Final[str] = "localmind"
 _DB_FILE: Final[str] = "data/webui.db"
 
 _SQL_CMDS = (
-    "DELETE FROM user          WHERE name LIKE '%Test Suite User%' AND email != 'serviceaccount@localmind.ai';"
+    "DELETE FROM user          WHERE email != 'serviceaccount@localmind.ai';"
     "DELETE FROM user_group    WHERE name <> 'default';"
     "DELETE FROM model; "
     "DELETE FROM model_whitelist; "
