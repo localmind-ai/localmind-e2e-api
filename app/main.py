@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-"""FastAPI admin API with background deploy jobs and status polling.
-This file merges the original synchronous implementation with a small
-in‑memory job queue so Swagger UI (/docs) can poll deployment progress.
+"""FastAPI admin API with **mutually exclusive** destructive operations.
+
+* Only **one** of the following is allowed to run at any time:
+  - background deployment
+  - database reset
+
+If another job is in progress the endpoint returns **HTTP 409**.
+Swagger UI can poll `/deploy/{job_id}` for status updates.
 """
 
 import os
@@ -15,13 +20,7 @@ from threading import Lock
 from typing import Final
 
 from dotenv import load_dotenv
-from fastapi import (
-    BackgroundTasks,
-    Depends,
-    FastAPI,
-    HTTPException,
-    status,
-)
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # -----------------------------------------------------------------------------
@@ -35,21 +34,17 @@ GIT_PAT: Final[str | None] = os.getenv("GIT_PERSONAL_ACCESS_TOKEN")
 
 if not API_KEY:
     raise RuntimeError("API_KEY must be set in .env")
-
 if not GIT_USERNAME or not GIT_PAT:
     raise RuntimeError("GIT_USERNAME and GIT_PERSONAL_ACCESS_TOKEN must be set in .env")
 
-# Beta paths
 ROOT = Path("/home/localmind")
 REPO = ROOT / "lm-custom-build" / "localmind"
 
-app = FastAPI(title="E2E API", version="1.1.0", docs_url="/docs")
+app = FastAPI(title="E2E API", version="1.2.0", docs_url="/docs")
 security = HTTPBearer(auto_error=False)
 
 
-def _auth(
-    cred: HTTPAuthorizationCredentials | None = Depends(security),
-) -> None:
+def _auth(cred: HTTPAuthorizationCredentials | None = Depends(security)) -> None:
     if cred is None or cred.scheme.lower() != "bearer" or cred.credentials != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -58,12 +53,12 @@ def _auth(
 
 
 # -----------------------------------------------------------------------------
-# utils
+# utilities
 # -----------------------------------------------------------------------------
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
-    """Run *cmd* raising an exception on non‑zero exit; stdout/stderr are captured."""
+    """Run *cmd* raising an exception on failure and capturing output."""
     try:
         subprocess.run(cmd, cwd=cwd, env=env, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
@@ -74,32 +69,12 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
 
 
 # -----------------------------------------------------------------------------
-# synchronous deployment helper (re‑uses original logic)
+# global lock – ensures only **one** destructive operation at a time
 # -----------------------------------------------------------------------------
-
-
-def _deploy_impl(branch: str) -> None:
-    env = {
-        **os.environ,
-        "GIT_USERNAME": GIT_USERNAME,
-        "GIT_PERSONAL_ACCESS_TOKEN": GIT_PAT,
-    }
-
-    _run(["docker", "compose", "down"], cwd=ROOT, env=env)
-
-    _run(["git", "switch", "main"], cwd=REPO, env=env)
-    _run(["git", "pull"], cwd=REPO, env=env)
-    _run(["git", "switch", branch], cwd=REPO, env=env)
-
-    _run(["docker", "image", "rm", "-f", "localmind"], cwd=ROOT, env=env)
-    _run(["docker", "builder", "prune", "-f"], cwd=ROOT, env=env)
-    _run(["docker", "build", "-t", "localmind", "."], cwd=REPO, env=env)
-
-    _run(["docker", "compose", "up", "-d"], cwd=ROOT, env=env)
-
+_OPER_LOCK: Lock = Lock()
 
 # -----------------------------------------------------------------------------
-# background job runner
+# deployment implementation
 # -----------------------------------------------------------------------------
 
 
@@ -117,81 +92,89 @@ class Job:
     state: State = State.queued
     step: str = "waiting for slot"
     error: str | None = None
-    logs: list[str] = field(default_factory=list)  # not exposed yet; future use
 
 
 JOBS: dict[str, Job] = {}
-_DEPLOY_LOCK: Lock = Lock()  # one deploy at a time – same semantics as before
 
 
-def _deploy_with_status(job: Job) -> None:
-    """Run the blocking deploy inside a background thread, updating *job*."""
-    with _DEPLOY_LOCK:
+def _deploy(job: Job) -> None:
+    """Perform the actual deployment, updating *job* fields for status polling."""
+    env = {
+        **os.environ,
+        "GIT_USERNAME": GIT_USERNAME,
+        "GIT_PERSONAL_ACCESS_TOKEN": GIT_PAT,
+    }
+
+    try:
         job.state, job.step = State.running, "docker compose down"
-        try:
-            # Each phase updates job.step before the command runs so clients see progress
-            _run(["docker", "compose", "down"], cwd=ROOT, env=os.environ)
+        _run(["docker", "compose", "down"], cwd=ROOT, env=env)
 
-            job.step = "git checkout main & pull"
-            _run(["git", "switch", "main"], cwd=REPO, env=os.environ)
-            _run(["git", "pull"], cwd=REPO, env=os.environ)
+        job.step = "git checkout main & pull"
+        _run(["git", "switch", "main"], cwd=REPO, env=env)
+        _run(["git", "pull"], cwd=REPO, env=env)
 
-            job.step = f"git switch {job.branch}"
-            _run(["git", "switch", job.branch], cwd=REPO, env=os.environ)
+        job.step = f"git switch {job.branch}"
+        _run(["git", "switch", job.branch], cwd=REPO, env=env)
 
-            job.step = "clean image & builder cache"
-            _run(["docker", "image", "rm", "-f", "localmind"], cwd=ROOT, env=os.environ)
-            _run(["docker", "builder", "prune", "-f"], cwd=ROOT, env=os.environ)
+        job.step = "clean image & builder cache"
+        _run(["docker", "image", "rm", "-f", "localmind"], cwd=ROOT, env=env)
+        _run(["docker", "builder", "prune", "-f"], cwd=ROOT, env=env)
 
-            job.step = "docker build"
-            _run(["docker", "build", "-t", "localmind", "."], cwd=REPO, env=os.environ)
+        job.step = "docker build"
+        _run(["docker", "build", "-t", "localmind", "."], cwd=REPO, env=env)
 
-            job.step = "docker compose up -d"
-            _run(["docker", "compose", "up", "-d"], cwd=ROOT, env=os.environ)
+        job.step = "docker compose up -d"
+        _run(["docker", "compose", "up", "-d"], cwd=ROOT, env=env)
 
-            job.state, job.step = State.success, "done"
-        except Exception as exc:
-            job.state, job.error = State.error, str(exc)
+        job.state, job.step = State.success, "done"
+    except Exception as exc:
+        job.state, job.error = State.error, str(exc)
 
 
 # -----------------------------------------------------------------------------
-# API – Deployment
+# API – deployment
 # -----------------------------------------------------------------------------
 
 
 @app.post("/deploy", dependencies=[Depends(_auth)])
 def deploy(branch: str, bg: BackgroundTasks):
-    """Kick off a deployment in the background and return a *job_id*."""
+    """Start a deployment in the background. Returns *job_id* or 409 if busy."""
     if not branch.strip():
-        raise HTTPException(status_code=400, detail="branch must be non‑empty")
+        raise HTTPException(status_code=400, detail="branch must be non-empty")
 
-    job_id = str(uuid.uuid4())
-    job = Job(id=job_id, branch=branch)
-    JOBS[job_id] = job
+    # enforce single‑flight across deploy & db‑reset
+    if not _OPER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Another operation is already in progress. Try again later.",
+        )
 
-    bg.add_task(_deploy_with_status, job)
+    job = Job(id=str(uuid.uuid4()), branch=branch)
+    JOBS[job.id] = job
 
-    return {"job_id": job_id}
+    def _task(j: Job):
+        try:
+            _deploy(j)
+        finally:
+            _OPER_LOCK.release()
+
+    bg.add_task(_task, job)
+    return {"job_id": job.id}
 
 
 @app.get("/deploy/{job_id}", dependencies=[Depends(_auth)])
 def deploy_status(job_id: str):
-    """Return the current state/step for the given *job_id*."""
+    """Poll the status of a deployment job."""
     job = JOBS.get(job_id)
-    if not job:
+    if job is None:
         raise HTTPException(status_code=404, detail="Unknown job")
-    return {
-        "state": job.state,
-        "step": job.step,
-        "error": job.error,
-    }
+    return {"state": job.state, "step": job.step, "error": job.error}
 
 
 # -----------------------------------------------------------------------------
-# helpers – database reset (unchanged apart from import tweaks)
+# helpers – database reset (shares the global lock)
 # -----------------------------------------------------------------------------
 
-_DB_LOCK: Lock = Lock()
 _CONTAINER: Final[str] = "localmind"
 _DB_FILE: Final[str] = "data/webui.db"
 
@@ -222,45 +205,34 @@ _SQL_CMDS = (
 
 
 def _reset_db_in_container() -> None:
-    """Ensure sqlite3 exists in the container, verify the DB file, then wipe rows."""
     bash_cmd = (
-        # 1) install sqlite3 if it's missing
         "command -v sqlite3 >/dev/null 2>&1 || ("
         "DEBIAN_FRONTEND=noninteractive apt-get update -y && "
         "DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3"
         ") && "
-        # 2) verify the DB file exists
         f'[[ -f "{_DB_FILE}" ]] || (echo "Database file {_DB_FILE} not found" >&2; exit 1) && '
-        # 3) run the deletes
         f'sqlite3 "{_DB_FILE}" "{_SQL_CMDS}"'
     )
-
     _run(
-        ["docker", "exec", _CONTAINER, "bash", "-c", bash_cmd],
-        cwd=ROOT,
-        env=os.environ,
+        ["docker", "exec", _CONTAINER, "bash", "-c", bash_cmd], cwd=ROOT, env=os.environ
     )
 
 
 @app.delete("/database", dependencies=[Depends(_auth)], include_in_schema=False)
 async def delete_database():
-    """Clear tables used by the E2E test‑suite."""
-    if not _DB_LOCK.acquire(blocking=False):
+    """Clear test‑suite tables. Returns 409 if a deploy or other reset is running."""
+    if not _OPER_LOCK.acquire(blocking=False):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A database‑reset is already in progress. Try again later.",
+            status_code=409,
+            detail="Another operation is already in progress. Try again later.",
         )
-
     try:
         _reset_db_in_container()
         return {"message": "Database deletion finished."}
-
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=f"Database deletion failed: {exc}",
+            status_code=500, detail=f"Database deletion failed: {exc}"
         ) from exc
-
     finally:
-        _DB_LOCK.release()
+        _OPER_LOCK.release()
 
