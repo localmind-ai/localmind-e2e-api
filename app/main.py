@@ -130,11 +130,11 @@ def deploy(branch: str):
 # -----------------------------------------------------------------------------
 # helpers – database reset
 # -----------------------------------------------------------------------------
-_DB_LOCK: Lock = Lock()  # separate from the deploy lock
+_DB_LOCK: Lock = Lock()
 _CONTAINER: Final[str] = "localmind"
-_DB_FILE: Final[str] = "data/webu.db"
+_DB_FILE: Final[str] = "data/webui.db"  # <── correct path
 
-_SQL_CMDS: Final[str] = (
+_SQL_CMDS = (
     "DELETE FROM user          WHERE name = 'Test Suite User'; "
     "DELETE FROM user_group    WHERE name != 'default'; "
     "DELETE FROM model; "
@@ -148,16 +148,18 @@ _SQL_CMDS: Final[str] = (
 
 def _reset_db_in_container() -> None:
     """
-    Make sure sqlite3 exists in the container and execute the wipe.
-    Assumes the container runs as root (or user with sudo-less package rights).
+    Ensure sqlite3 exists in the container, verify the DB file, then wipe rows.
     """
     bash_cmd = (
-        # 1) install sqlite3 if missing
-        "command -v sqlite3 >/dev/null 2>&1 || "
-        "(DEBIAN_FRONTEND=noninteractive apt-get update && "
-        " DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3) && "
-        # 2) run the deletes
-        f'sqlite3 {_DB_FILE} "{_SQL_CMDS}"'
+        # 1) install sqlite3 if it’s missing
+        "command -v sqlite3 >/dev/null 2>&1 || ("
+        "DEBIAN_FRONTEND=noninteractive apt-get update -y && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3"
+        ") && "
+        # 2) verify the DB file exists
+        f'[[ -f "{_DB_FILE}" ]] || (echo "Database file {_DB_FILE} not found" >&2; exit 1) && '
+        # 3) run the deletes
+        f'sqlite3 "{_DB_FILE}" "{_SQL_CMDS}"'
     )
 
     _run(
