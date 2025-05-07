@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 from threading import Lock
 from typing import Final
-import sqlite3
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -128,41 +127,67 @@ def deploy(branch: str):
         _DEPLOY_LOCK.release()
 
 
+# -----------------------------------------------------------------------------
+# helpers - database reset
+# -----------------------------------------------------------------------------
+_DB_LOCK: Lock = Lock()  # keep it separate from the deploy lock
+_CONTAINER: Final[str] = "localmind"
+_DB_FILE_INSIDE: Final[str] = "data/webu.db"
+
+_SQL_CMDS: Final[str] = (
+    "DELETE FROM user WHERE name = 'Test Suite User'; "
+    "DELETE FROM user_group WHERE name != 'default'; "
+    "DELETE FROM model; "
+    "DELETE FROM model_whitelist; "
+    "DELETE FROM tool; "
+    "DELETE FROM tool_whitelist; "
+    "DELETE FROM function; "
+    "DELETE FROM function_whitelist;"
+)
+
+
+def _reset_db_in_container() -> None:
+    """
+    Run sqlite commands inside the running Docker container.
+    Needs `sqlite3` to be present in the image.
+    """
+    # Each statement ends with a semicolon, so one invocation is enough.
+    bash_cmd = f'sqlite3 {_DB_FILE_INSIDE} "{_SQL_CMDS}"'
+
+    _run(
+        ["docker", "exec", _CONTAINER, "bash", "-c", bash_cmd],
+        cwd=ROOT,
+        env=os.environ,  # no special env needed
+    )
+
+
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
 @app.delete("/database", dependencies=[Depends(_auth)])
 async def delete_database():
     """
-    Clear certain database tables that need to be reset when running our e2e test suite on the Beta environment.
-      • 200 on success
-      • 500 on any failure (with reason)
+    Clear the tables that have to be reset for the E2E test-suite.
+
+      200 - success
+      409 - another reset already running
+      500 - something went wrong (reason in body)
     """
-    db_path = REPO / "data" / "webu.db"
+    if not _DB_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A database-reset is already in progress. Try again later.",
+        )
 
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        # Delete specific test users
-        cursor.execute("DELETE FROM user WHERE name = 'Test Suite User';")
-
-        # Clear user_group except 'default'
-        cursor.execute("DELETE FROM user_group WHERE name != 'default';")
-
-        # Clear other tables
-        cursor.execute("DELETE FROM model;")
-        cursor.execute("DELETE FROM model_whitelist;")
-
-        cursor.execute("DELETE FROM tool;")
-        cursor.execute("DELETE FROM tool_whitelist;")
-
-        cursor.execute("DELETE FROM function;")
-        cursor.execute("DELETE FROM function_whitelist;")
-
-        conn.commit()
-        conn.close()
-
+        _reset_db_in_container()
         return {"message": "Database deletion finished."}
 
     except Exception as exc:
         raise HTTPException(
-            status_code=500, detail=f"Database deletion failed: {exc}"
+            status_code=500,
+            detail=f"Database deletion failed: {exc}",
         ) from exc
+
+    finally:
+        _DB_LOCK.release()
