@@ -135,10 +135,11 @@ _CONTAINER: Final[str] = "localmind"
 _DB_FILE: Final[str] = "data/webui.db"
 
 _SQL_CMDS = (
-    "DELETE FROM user          WHERE name = 'Test Suite User'; "
+    "DELETE FROM user          WHERE name LIKE '%Test Suite User%'; "
     "DELETE FROM user_group    WHERE name != 'default'; "
     "DELETE FROM model; "
     "DELETE FROM model_whitelist; "
+    "DELETE FROM model_custom_variable;"
     "DELETE FROM tool; "
     "DELETE FROM tool_whitelist; "
     "DELETE FROM function; "
@@ -146,6 +147,16 @@ _SQL_CMDS = (
     "DELETE FROM folder;"
     "DELETE FROM folder_whitelist;"
     "DELETE FROM document;"
+    "DELETE FROM organization;"
+    "DELETE FROM organization_custom_variable;"
+    "DELETE FROM file;"
+    "DELETE FROM group_membership;"
+    "DELETE FROM project;"
+    "DELETE FROM project_whitelist;"
+    "DELETE FROM prompt;"
+    "DELETE FROM prompt_whitelist;"
+    "DELETE FROM uploaded_file;"
+    "DELETE FROM webpages;"
 )
 
 
