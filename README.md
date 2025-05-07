@@ -33,17 +33,19 @@ Changes to `app/` are picked up automatically via `uvicorn --reload`.
 
 ### 3. Production
 
-Our Nginx server has been configured to route traffic hitting `https://beta-e2e.localmind.io/` to port 8000 of the beta server.
+Our Nginx server routes traffic hitting `https://beta-e2e.localmind.io/` to **port 8000** on the beta server.
 
-First, make sure production dependencies are installed:
+First, install production dependencies:
 
 ```bash
 poetry install --no-dev
 ```
 
-Then, create a service unit so the API starts automatically on boot and is supervised by the OS.
+---
 
-```bash
+#### Create the systemd service
+
+```ini
 # /etc/systemd/system/e2e-api.service
 [Unit]
 Description=E2E FastAPI service (Gunicorn/Uvicorn)
@@ -53,7 +55,7 @@ After=network.target
 # Path to the repo root
 WorkingDirectory=/opt/e2e-api
 # Absolute path to Poetry (adjust if different on your box)
-ExecStart=/usr/bin/poetry run gunicorn app.main:app \
+ExecStart=/usr/bin/poetry run gunicorn app:app \
           -k uvicorn.workers.UvicornWorker \
           --workers 4 \
           --bind 0.0.0.0:8000
@@ -69,7 +71,14 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 ```
 
-Whenever you deploy updates:
+> **Make sure** `GIT_USERNAME` and `GIT_PERSONAL_ACCESS_TOKEN` are present in
+> `/opt/e2e-api/.env`; they’re required by the `/deploy` endpoint.
+
+---
+
+#### Deploying updates
+
+**SSH / manual:**
 
 ```bash
 git pull
@@ -77,23 +86,25 @@ poetry install --no-dev
 sudo systemctl restart e2e-api
 ```
 
-That's it! Here are some general commands to help you manage the system service:
+---
+
+#### Managing the service
 
 ```bash
-# register the new unit file
+# register (or reload) the unit file
 sudo systemctl daemon-reload
 
-# start / stop / restart the service
+# start / stop / restart
 sudo systemctl start   e2e-api
 sudo systemctl stop    e2e-api
 sudo systemctl restart e2e-api
 
-# enable on boot
+# enable at boot
 sudo systemctl enable  e2e-api
 
-# check current status
+# check status
 sudo systemctl status  e2e-api
 
-# tail logs (Press Ctrl-C to exit)
+# tail logs (Ctrl‑C to exit)
 sudo journalctl -u e2e-api -f
 ```
