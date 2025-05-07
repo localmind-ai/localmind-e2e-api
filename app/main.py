@@ -6,8 +6,16 @@ from __future__ import annotations
   - background deployment
   - database reset
 
-If another job is in progress the endpoint returns **HTTP 409**.
-Swagger UI can poll `/deploy/{job_id}` for status updates.
+HTTP 409 is returned when an operation is already in progress.
+
+### Non‑interactive Git authentication
+Git commands occasionally blocked on a username/password prompt.  We now:
+1. Extract the current `origin` URL.
+2. Temporarily rewrite it to `https://<user>:<token>@...`.
+3. Run all Git commands.
+4. Restore the original URL (even on failure).
+
+`GIT_TERMINAL_PROMPT=0` is also set to guarantee Git never stalls waiting for input.
 """
 
 import os
@@ -40,7 +48,7 @@ if not GIT_USERNAME or not GIT_PAT:
 ROOT = Path("/home/localmind")
 REPO = ROOT / "lm-custom-build" / "localmind"
 
-app = FastAPI(title="E2E API", version="1.2.0", docs_url="/docs")
+app = FastAPI(title="E2E API", version="1.3.0", docs_url="/docs")
 security = HTTPBearer(auto_error=False)
 
 
@@ -58,7 +66,7 @@ def _auth(cred: HTTPAuthorizationCredentials | None = Depends(security)) -> None
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
-    """Run *cmd* raising an exception on failure and capturing output."""
+    """Run *cmd* raising on non‑zero exit, capturing stdout/stderr for traceability."""
     try:
         subprocess.run(cmd, cwd=cwd, env=env, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
@@ -66,6 +74,15 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
             f"Command {' '.join(exc.cmd)!r} failed (exit {exc.returncode})\n"
             f"stdout:\n{exc.stdout.decode()}\nstderr:\n{exc.stderr.decode()}"
         ) from exc
+
+
+def _get_remote_url() -> str:
+    """Return the current `origin` URL inside *REPO*."""
+    return (
+        subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=REPO)
+        .decode()
+        .strip()
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -98,20 +115,34 @@ JOBS: dict[str, Job] = {}
 
 
 def _deploy(job: Job) -> None:
-    """Perform the actual deployment, updating *job* fields for status polling."""
+    """Perform the deployment, updating *job* status along the way."""
+    # Ensure Git never prompts interactively
     env = {
         **os.environ,
-        "GIT_USERNAME": GIT_USERNAME,
-        "GIT_PERSONAL_ACCESS_TOKEN": GIT_PAT,
+        "GIT_TERMINAL_PROMPT": "0",
     }
 
+    # --- prepare Git credential injection ----------------------------------
+    original_remote = _get_remote_url()
+    if not original_remote.startswith("http"):
+        raise RuntimeError(
+            "Remote URL is not HTTP(S); cannot inject credentials safely."
+        )
+    auth_remote = original_remote.replace(
+        "https://", f"https://{GIT_USERNAME}:{GIT_PAT}@"
+    )
+
     try:
+        # set authenticated remote URL
+        _run(["git", "remote", "set-url", "origin", auth_remote], cwd=REPO, env=env)
+
+        # actual deploy steps -------------------------------------------------
         job.state, job.step = State.running, "docker compose down"
         _run(["docker", "compose", "down"], cwd=ROOT, env=env)
 
         job.step = "git checkout main & pull"
         _run(["git", "switch", "main"], cwd=REPO, env=env)
-        _run(["git", "pull"], cwd=REPO, env=env)
+        _run(["git", "pull", "--ff-only"], cwd=REPO, env=env)
 
         job.step = f"git switch {job.branch}"
         _run(["git", "switch", job.branch], cwd=REPO, env=env)
@@ -129,6 +160,16 @@ def _deploy(job: Job) -> None:
         job.state, job.step = State.success, "done"
     except Exception as exc:
         job.state, job.error = State.error, str(exc)
+    finally:
+        # always restore the original remote URL to avoid leaking the token on disk
+        try:
+            _run(
+                ["git", "remote", "set-url", "origin", original_remote],
+                cwd=REPO,
+                env=env,
+            )
+        finally:
+            pass  # even if this fails, the lock must be released by caller
 
 
 # -----------------------------------------------------------------------------
@@ -138,11 +179,10 @@ def _deploy(job: Job) -> None:
 
 @app.post("/deploy", dependencies=[Depends(_auth)])
 def deploy(branch: str, bg: BackgroundTasks):
-    """Start a deployment in the background. Returns *job_id* or 409 if busy."""
+    """Start a deployment. Returns *job_id* or 409 if another job/reset is running."""
     if not branch.strip():
         raise HTTPException(status_code=400, detail="branch must be non-empty")
 
-    # enforce single‑flight across deploy & db‑reset
     if not _OPER_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
@@ -164,7 +204,6 @@ def deploy(branch: str, bg: BackgroundTasks):
 
 @app.get("/deploy/{job_id}", dependencies=[Depends(_auth)])
 def deploy_status(job_id: str):
-    """Poll the status of a deployment job."""
     job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Unknown job")
@@ -220,7 +259,6 @@ def _reset_db_in_container() -> None:
 
 @app.delete("/database", dependencies=[Depends(_auth)], include_in_schema=False)
 async def delete_database():
-    """Clear test‑suite tables. Returns 409 if a deploy or other reset is running."""
     if not _OPER_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
