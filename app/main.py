@@ -132,7 +132,7 @@ def deploy(branch: str):
 # -----------------------------------------------------------------------------
 _DB_LOCK: Lock = Lock()
 _CONTAINER: Final[str] = "localmind"
-_DB_FILE: Final[str] = "data/webui.db"  # <── correct path
+_DB_FILE: Final[str] = "data/webui.db"
 
 _SQL_CMDS = (
     "DELETE FROM user          WHERE name = 'Test Suite User'; "
@@ -143,6 +143,9 @@ _SQL_CMDS = (
     "DELETE FROM tool_whitelist; "
     "DELETE FROM function; "
     "DELETE FROM function_whitelist;"
+    "DELETE FROM folder;"
+    "DELETE FROM folder_whitelist;"
+    "DELETE FROM document;"
 )
 
 
