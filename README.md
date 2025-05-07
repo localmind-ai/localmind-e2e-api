@@ -55,7 +55,7 @@ After=network.target
 # Path to the repo root
 WorkingDirectory=/home/localmind-e2e-api
 # Absolute path to Poetry
-ExecStart=/usr/bin/poetry run gunicorn app:app \
+ExecStart=/root/.local/bin/poetry run gunicorn app:app \
           -k uvicorn.workers.UvicornWorker \
           --workers 4 \
           --bind 0.0.0.0:8000
