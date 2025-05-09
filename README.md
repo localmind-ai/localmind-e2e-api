@@ -44,33 +44,7 @@ poetry install --no-dev     # from the project root as localmind user, not root 
 
 ---
 
-#### 2 · Create a start-up script (wrapper)
-
-Because `poetry` often lives in _per-user_ paths, a tiny wrapper script keeps the
-systemd unit clean and avoids hard-coding paths inside the service file. This script
-already exists in this repo, but just for reference, here it is:
-
-```bash
-#!/usr/bin/env bash
-set -e
-cd /home/localmind-e2e-api
-
-# use Poetry to launch Gunicorn/Uvicorn
-exec /home/localmind/.local/bin/poetry run gunicorn app.main:app \
-     -k uvicorn.workers.UvicornWorker \
-     --workers 4 \
-     --bind 0.0.0.0:8000
-```
-
-```bash
-chmod +x /home/localmind-e2e-api/start.sh
-```
-
-_(Replace `/usr/local/bin/poetry` if `which poetry` prints something else.)_
-
----
-
-#### 3 · Create the **systemd** unit
+#### 2 · Create the **systemd** unit
 
 Create the following system service. Note that this runs the FastAPI as the localmind user, not root. So you need to make sure that you followed step 1 correctly or the service will fail to start.
 
@@ -81,11 +55,14 @@ Description=E2E FastAPI service (Gunicorn/Uvicorn)
 After=network.target
 
 [Service]
+WorkingDirectory=/home/localmind-e2e-api
 User=localmind
 Group=localmind
-ExecStart=/home/localmind-e2e-api/start.sh
-WorkingDirectory=/home/localmind-e2e-api
-EnvironmentFile=/home/localmind-e2e-api/.env
+
+ExecStart=/usr/local/bin/poetry run gunicorn app.main:app \
+          -k uvicorn.workers.UvicornWorker \
+          --workers 4 \
+          --bind 0.0.0.0:8000
 
 # Restart policy
 Restart=on-failure
@@ -101,7 +78,7 @@ WantedBy=multi-user.target
 
 ---
 
-#### 4 · Enable and start the service
+#### 3 · Enable and start the service
 
 ```bash
 sudo systemctl daemon-reload       # pick up the new unit
