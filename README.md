@@ -29,21 +29,47 @@ poetry install
 poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Changes to `app/` are picked up automatically via `uvicorn --reload`.
+### 3. Production deployment
 
-### 3. Production
+Traffic that reaches `https://beta-e2e.localmind.io/` is forwarded by our global **Nginx** to port **8000** on the beta server, where the FastAPI app listens.
 
-Our Nginx server routes traffic hitting `https://beta-e2e.localmind.io/` to **port 8000** on the beta server.
+---
 
-First, install production dependencies:
+#### 1 · Install runtime dependencies
 
 ```bash
-poetry install --no-dev
+poetry install --no-dev     # from the project root
 ```
 
 ---
 
-#### Create the systemd service
+#### 2 · Create a start-up script (wrapper)
+
+Because `poetry` often lives in _per-user_ paths, a tiny wrapper script keeps the
+systemd unit clean and avoids hard-coding paths inside the service file.
+
+```bash
+# /home/localmind-e2e-api/start.sh
+#!/usr/bin/env bash
+set -e
+cd /home/localmind-e2e-api
+
+# use Poetry to launch Gunicorn/Uvicorn
+exec /home/localmind/.local/bin/poetry run gunicorn app:app \
+     -k uvicorn.workers.UvicornWorker \
+     --workers 4 \
+     --bind 0.0.0.0:8000
+```
+
+```bash
+chmod +x /home/localmind-e2e-api/start.sh
+```
+
+_(Replace `/usr/local/bin/poetry` if `which poetry` prints something else.)_
+
+---
+
+#### 3 · Create the **systemd** unit
 
 ```ini
 # /etc/systemd/system/e2e-api.service
@@ -52,18 +78,14 @@ Description=E2E FastAPI service (Gunicorn/Uvicorn)
 After=network.target
 
 [Service]
-# Path to the repo root
 WorkingDirectory=/home/localmind-e2e-api
-# Absolute path to Poetry
-ExecStart=/root/.local/bin/poetry run gunicorn app:app \
-          -k uvicorn.workers.UvicornWorker \
-          --workers 4 \
-          --bind 0.0.0.0:8000
+ExecStart=/home/localmind-e2e-api/start.sh
 EnvironmentFile=/home/localmind-e2e-api/.env
 User=www-data
 Group=www-data
+
+# Restart policy
 Restart=on-failure
-# Give Gunicorn time to gracefully stop workers
 KillSignal=SIGINT
 TimeoutStopSec=30
 
@@ -71,14 +93,22 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 ```
 
-> **Make sure** `GIT_USERNAME` and `GIT_PERSONAL_ACCESS_TOKEN` are present in
-> `/opt/e2e-api/.env`; they’re required by the `/deploy` endpoint.
+> **Ensure** your `.env` contains `API_KEY`, `GIT_USERNAME`, and
+> `GIT_PERSONAL_ACCESS_TOKEN` – the `/deploy` endpoint needs them.
 
 ---
 
-#### Deploying updates
+#### 4 · Enable and start the service
 
-**SSH / manual:**
+```bash
+sudo systemctl daemon-reload       # pick up the new unit
+sudo systemctl enable  e2e-api     # start on boot
+sudo systemctl start   e2e-api
+```
+
+---
+
+### Deploying updates
 
 ```bash
 git pull
@@ -88,10 +118,10 @@ sudo systemctl restart e2e-api
 
 ---
 
-#### Managing the service
+### Managing the service
 
 ```bash
-# register (or reload) the unit file
+# reload unit if you edit it
 sudo systemctl daemon-reload
 
 # start / stop / restart
@@ -99,12 +129,15 @@ sudo systemctl start   e2e-api
 sudo systemctl stop    e2e-api
 sudo systemctl restart e2e-api
 
-# enable at boot
+# enable on boot
 sudo systemctl enable  e2e-api
 
-# check status
+# current status
 sudo systemctl status  e2e-api
 
-# tail logs (Ctrl‑C to exit)
+# live logs (Ctrl-C to exit)
 sudo journalctl -u e2e-api -f
 ```
+
+> **Troubleshooting tip:** if the service fails to start, run  
+> `sudo journalctl -xeu e2e-api.service` to see exact error messages.
