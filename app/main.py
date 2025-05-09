@@ -257,7 +257,7 @@ def _reset_db_in_container() -> None:
     )
 
 
-@app.delete("/database", dependencies=[Depends(_auth)], include_in_schema=False)
+@app.delete("/database", dependencies=[Depends(_auth)])
 async def delete_database():
     if not _OPER_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -273,4 +273,3 @@ async def delete_database():
         ) from exc
     finally:
         _OPER_LOCK.release()
-
