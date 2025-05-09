@@ -38,7 +38,8 @@ Traffic that reaches `https://beta-e2e.localmind.io/` is forwarded by our global
 #### 1 · Install runtime dependencies
 
 ```bash
-poetry install --no-dev     # from the project root
+sudo -u localmind -i
+poetry install --no-dev     # from the project root as localmind user, not root user!
 ```
 
 ---
@@ -46,10 +47,10 @@ poetry install --no-dev     # from the project root
 #### 2 · Create a start-up script (wrapper)
 
 Because `poetry` often lives in _per-user_ paths, a tiny wrapper script keeps the
-systemd unit clean and avoids hard-coding paths inside the service file.
+systemd unit clean and avoids hard-coding paths inside the service file. This script
+already exists in this repo, but just for reference, here it is:
 
 ```bash
-# /home/localmind-e2e-api/start.sh
 #!/usr/bin/env bash
 set -e
 cd /home/localmind-e2e-api
@@ -71,6 +72,8 @@ _(Replace `/usr/local/bin/poetry` if `which poetry` prints something else.)_
 
 #### 3 · Create the **systemd** unit
 
+Create the following system service. Note that this runs the FastAPI as the localmind user, not root. So you need to make sure that you followed step 1 correctly or the service will fail to start.
+
 ```ini
 # /etc/systemd/system/e2e-api.service
 [Unit]
@@ -78,11 +81,11 @@ Description=E2E FastAPI service (Gunicorn/Uvicorn)
 After=network.target
 
 [Service]
-WorkingDirectory=/home/localmind-e2e-api
+User=localmind
+Group=localmind
 ExecStart=/home/localmind-e2e-api/start.sh
+WorkingDirectory=/home/localmind-e2e-api
 EnvironmentFile=/home/localmind-e2e-api/.env
-User=www-data
-Group=www-data
 
 # Restart policy
 Restart=on-failure
@@ -111,6 +114,7 @@ sudo systemctl start   e2e-api
 ### Deploying updates
 
 ```bash
+sudo -u localmind -i
 git pull
 poetry install --no-dev
 sudo systemctl restart e2e-api
