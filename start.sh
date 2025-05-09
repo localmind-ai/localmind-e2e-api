@@ -1,4 +1,3 @@
-# /home/localmind-e2e-api/start.sh
 #!/usr/bin/env bash
 set -e
 cd /home/localmind-e2e-api
